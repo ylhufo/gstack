@@ -137,4 +137,26 @@ describe("gstack-gbrain-sync CLI", () => {
     expect(state.last_stages.length).toBe(0);
     rmSync(home, { recursive: true, force: true });
   });
+
+  it("brain-sync stage resolves the sibling binary, not a HOME-rooted path", () => {
+    // Regression for Codex M9: pre-fix the orchestrator looked up
+    // ~/.claude/skills/gstack/bin/gstack-brain-sync, which silently no-op'd
+    // on Codex installs and dev workspaces with the misleading summary
+    // "skipped (gstack-brain-sync not installed)". Post-fix it resolves
+    // a sibling via import.meta.dir and actually invokes the script.
+    const home = makeTestHome();
+    const gstackHome = join(home, ".gstack");
+    mkdirSync(gstackHome, { recursive: true });
+
+    const r = runScript(
+      ["--incremental", "--no-code", "--no-memory", "--quiet"],
+      { HOME: home, GSTACK_HOME: gstackHome },
+    );
+
+    // Don't assert exit code (sibling spawn may legitimately error in a
+    // sandboxed test). Assert only that we did NOT take the lying-skip path.
+    const combined = r.stdout + r.stderr;
+    expect(combined).not.toContain("skipped (gstack-brain-sync not installed)");
+    rmSync(home, { recursive: true, force: true });
+  });
 });

@@ -101,14 +101,14 @@ jobs:
             echo "TMPDIR=/home/runner/.cache"
           } >> "$GITHUB_ENV"
 
-      # Hardlink copy (cp -al) instead of symlink: bun build resolves a file's
-      # realpath when looking for sibling deps, which makes a symlinked
-      # /opt/node_modules_cache fail to resolve transitive deps. See
-      # evals.yml for the full explanation.
+      # Recursive copy (cp -r) instead of symlink: bun build resolves a
+      # file's realpath when looking for sibling deps. See evals.yml for the
+      # full explanation. cp -al would be faster but /opt and /workspace
+      # are on different overlay-fs layers, so cross-device hardlink fails.
       - name: Restore deps
         run: |
           if [ -d /opt/node_modules_cache ] && diff -q /opt/node_modules_cache/.package.json package.json >/dev/null 2>&1; then
-            cp -al /opt/node_modules_cache node_modules
+            cp -r /opt/node_modules_cache node_modules
           else
             bun install
           fi

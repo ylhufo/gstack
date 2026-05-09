@@ -414,6 +414,61 @@ function findTelemetryBinary(): string | null {
 }
 
 /**
+ * Resolve a bash binary for invoking shebang scripts on Windows. Mirrors the
+ * GSTACK_*_BIN override pattern from `browse/src/claude-bin.ts:resolveClaudeCommand`
+ * (introduced in v1.24.0.0 #1252) so users on WSL/MSYS2/non-default Git Bash
+ * installs can redirect.
+ *
+ * Override precedence:
+ *   1. GSTACK_BASH_BIN (or BASH_BIN) — absolute path or PATH-resolvable command.
+ *   2. Plain Bun.which('bash') — finds Git Bash on the standard Windows install.
+ *
+ * Returns null if nothing resolves; callers must degrade gracefully (telemetry
+ * already swallows spawn errors, so a null here means the local attempts.jsonl
+ * audit trail keeps working without surfacing a Windows-only failure).
+ */
+export function resolveBashBinary(env: NodeJS.ProcessEnv = process.env): string | null {
+  const PATH = env.PATH ?? env.Path ?? '';
+  const override = (env.GSTACK_BASH_BIN ?? env.BASH_BIN)?.trim();
+  if (override) {
+    const trimmed = override.replace(/^"(.*)"$/, '$1');
+    return path.isAbsolute(trimmed) ? trimmed : (Bun.which(trimmed, { PATH }) ?? null);
+  }
+  return Bun.which('bash', { PATH }) ?? null;
+}
+
+/**
+ * Build the [cmd, args] tuple for invoking a bash-script telemetry binary
+ * in a way that works on both POSIX and Windows.
+ *
+ * POSIX: returns [bin, args] unchanged — shebang gets honored by execve.
+ * Win32: wraps in bash explicitly. `gstack-telemetry-log` is a shell script
+ * (`#!/usr/bin/env bash`) and Windows `CreateProcess` can't dispatch on a
+ * shebang — it tries to load the file as a PE image, fails with ENOEXEC,
+ * and our 'error' handler silently swallows it. Resolves bash via the same
+ * Bun.which + GSTACK_*_BIN override pattern as claude-bin.ts.
+ *
+ * Returns null when bash can't be resolved on Windows (rare — Git Bash ships
+ * with the standard gstack install path). Caller skips spawn; the local
+ * attempts.jsonl write still gives the audit trail.
+ *
+ * Exported for testability — resolution is a pure function of (platform,
+ * env, bin, args) so we can assert on it without actually spawning.
+ */
+export function buildTelemetrySpawnCommand(
+  bin: string,
+  args: string[],
+  env: NodeJS.ProcessEnv = process.env,
+): { cmd: string; cmdArgs: string[] } | null {
+  if (process.platform === 'win32') {
+    const bashPath = resolveBashBinary(env);
+    if (!bashPath) return null;
+    return { cmd: bashPath, cmdArgs: [bin, ...args] };
+  }
+  return { cmd: bin, cmdArgs: args };
+}
+
+/**
  * Fire-and-forget subprocess invocation of gstack-telemetry-log with the
  * attack_attempt event type. The binary handles tier gating internally
  * (community → upload, anonymous → local only, off → no-op), so we don't
@@ -426,14 +481,16 @@ function reportAttemptTelemetry(record: AttemptRecord): void {
   const bin = findTelemetryBinary();
   if (!bin) return;
   try {
-    const child = spawn(bin, [
+    const result = buildTelemetrySpawnCommand(bin, [
       '--event-type', 'attack_attempt',
       '--url-domain', record.urlDomain || '',
       '--payload-hash', record.payloadHash,
       '--confidence', String(record.confidence),
       '--layer', record.layer,
       '--verdict', record.verdict,
-    ], {
+    ]);
+    if (!result) return;
+    const child = spawn(result.cmd, result.cmdArgs, {
       stdio: 'ignore',
       detached: true,
     });

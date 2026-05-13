@@ -37,6 +37,7 @@ import { createHash } from "crypto";
 
 import { detectEngineTier, withErrorContext, canonicalizeRemote } from "../lib/gstack-memory-helpers";
 import { ensureSourceRegistered, sourcePageCount } from "../lib/gbrain-sources";
+import { localEngineStatus, type LocalEngineStatus } from "../lib/gbrain-local-status";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -290,6 +291,42 @@ function releaseLock(): void {
 
 // ── Stage runners ──────────────────────────────────────────────────────────
 
+/**
+ * Build a SKIP result for the code/memory stage when the local engine is
+ * not in 'ok' state (per plan D12). Surface the status verbatim so the
+ * verdict block tells the user exactly what's wrong without re-probing.
+ *
+ * Reasons mapped to user-actionable summaries:
+ *   no-cli         → "gbrain CLI not on PATH; install via /setup-gbrain"
+ *   missing-config → "no local engine; run /setup-gbrain to add local PGLite"
+ *   broken-config  → "config file at ~/.gbrain/config.json is malformed; see /setup-gbrain Step 1.5"
+ *   broken-db      → "config points at unreachable DB; see /setup-gbrain Step 1.5"
+ */
+function skipStageForLocalStatus(
+  stage: "code" | "memory",
+  status: LocalEngineStatus,
+  t0: number,
+): StageResult {
+  const reasons: Record<Exclude<LocalEngineStatus, "ok">, string> = {
+    "no-cli": "gbrain CLI not on PATH; install via /setup-gbrain",
+    "missing-config":
+      "no local engine; run /setup-gbrain to add local PGLite for code search",
+    "broken-config":
+      "config at ~/.gbrain/config.json is malformed; see /setup-gbrain Step 1.5",
+    "broken-db":
+      "config points at unreachable DB; see /setup-gbrain Step 1.5",
+  };
+  const reason = reasons[status as Exclude<LocalEngineStatus, "ok">];
+  return {
+    name: stage,
+    ran: false,
+    ok: true, // SKIP (per D12) — not a stage failure, just an unsatisfied prerequisite
+    duration_ms: Date.now() - t0,
+    summary: `skipped — local engine ${status} — ${reason}`,
+  };
+}
+
+
 async function runCodeImport(args: CliArgs): Promise<StageResult> {
   const t0 = Date.now();
   const root = repoRoot();
@@ -302,6 +339,9 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
 
   const sourceId = deriveCodeSourceId(root);
 
+  // dry-run preview always shows the would-do steps, regardless of local
+  // engine state. Useful for "what would /sync-gbrain do" without probing
+  // the engine.
   if (args.mode === "dry-run") {
     return {
       name: "code",
@@ -311,6 +351,17 @@ async function runCodeImport(args: CliArgs): Promise<StageResult> {
       summary: `would: gbrain sources add ${sourceId} --path ${root} --federated; gbrain sync --strategy code --source ${sourceId}; gbrain sources attach ${sourceId}`,
       detail: { source_id: sourceId, source_path: root, status: "skipped" },
     };
+  }
+
+  // Split-engine pre-flight (per plan D12): when local engine is not ok, SKIP
+  // code stage cleanly. Brain-sync stage still runs because it doesn't depend
+  // on local engine. The /sync-gbrain Step 1.5 pre-flight surfaces the user
+  // remediation message; this skip just keeps the orchestrator from crashing
+  // when the local DB is dead. Skipped on --dry-run (above) since dry-run
+  // never actually probes anything.
+  const localStatus = localEngineStatus({ noCache: false });
+  if (localStatus !== "ok") {
+    return skipStageForLocalStatus("code", localStatus, t0);
   }
 
   // Step 0: Best-effort cleanup of pre-pathhash legacy source.
@@ -429,6 +480,15 @@ function runMemoryIngest(args: CliArgs): StageResult {
 
   if (args.mode === "dry-run") {
     return { name: "memory", ran: false, ok: true, duration_ms: 0, summary: "would: gstack-memory-ingest --probe" };
+  }
+
+  // Split-engine pre-flight (per plan D12). gstack-memory-ingest shells out
+  // to `gbrain import` which targets the LOCAL engine. When that engine is
+  // not ok, SKIP cleanly so brain-sync (the only stage that doesn't depend
+  // on local engine) still runs.
+  const localStatus = localEngineStatus({ noCache: false });
+  if (localStatus !== "ok") {
+    return skipStageForLocalStatus("memory", localStatus, t0);
   }
 
   const ingestPath = join(import.meta.dir, "gstack-memory-ingest.ts");

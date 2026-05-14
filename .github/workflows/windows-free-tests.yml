@@ -1,6 +1,6 @@
 name: Windows Free Tests
 
-# Curated subset of the free test suite that runs on windows-latest.
+# Curated subset of the free test suite that runs on a paid faster Windows runner.
 #
 # Codex's v1.18.0.0 review flagged that the existing evals.yml workflow uses
 # a Linux container, so a windows-latest matrix entry there isn't a drop-in.
@@ -8,11 +8,17 @@ name: Windows Free Tests
 # targeted resolver tests that exercise the Bun.which-based claude binary
 # resolution + the GSTACK_CLAUDE_BIN override path on Windows.
 #
-# What this DOES NOT do (out of scope for v1.18.0.0):
+# Runner: migrated v1.36.0.0 from GitHub-hosted `windows-latest` to Blacksmith's
+# paid Windows runner. Spin-up is ~10s vs ~60s and Bun installs land 3-4x faster.
+# If Blacksmith isn't configured for this org, swap to `windows-latest` (the
+# free GitHub runner, slower but always available). Namespace, Ubicloud-Windows,
+# and other paid pools work too — just match your org's billing.
+#
+# What this DOES NOT do (still out of scope, tracked as follow-up):
 #   - Run the full free suite on Windows. The 24 tests that hardcode /bin/sh,
 #     spawn('sh',...), or raw /tmp/ paths are excluded by scripts/test-free-shards.ts
 #     --windows-only. They need POSIX-bound surfaces to be ported off shell
-#     primitives before they can run on Windows. Tracked as a follow-up TODO.
+#     primitives before they can run on Windows.
 #   - Run Playwright/browser-backed tests. Browse server bring-up on Windows is
 #     a separate concern (PR #1238 windows-pty-bun-pty-fix is in flight).
 
@@ -27,7 +33,10 @@ concurrency:
 
 jobs:
   windows-free-tests:
-    runs-on: windows-latest
+    # Paid faster Windows runner. Verify the label matches what's enabled for
+    # this repo's Blacksmith installation. Common alternatives:
+    #   blacksmith-4vcpu-windows-2022, namespace-profile-windows, windows-latest
+    runs-on: blacksmith-2vcpu-windows-2022
     timeout-minutes: 15
 
     steps:
@@ -91,7 +100,9 @@ jobs:
         continue-on-error: true
 
       - name: Verify new portability work on Windows
-        # Tests targeting the v1.20.0.0 lane plus v1.30.0.0 fix-wave additions.
+        # Tests targeting the v1.20.0.0 lane plus v1.30.0.0 fix-wave additions
+        # plus v1.36.0.0 Windows-install hardening (sanitizer + _link_or_copy
+        # helper + build-script subshells + doc/config-key drift guard).
         # v1.30.0.0 extension covers icacls hardening (#1308), bash.exe telemetry
         # wrap (#1306), and Bun.which-based binary resolvers (#1307). These must
         # pass on Windows for the wave's "Windows hardening" framing to be honest.
@@ -102,6 +113,10 @@ jobs:
             test/test-free-shards.test.ts \
             browse/test/file-permissions.test.ts \
             browse/test/security.test.ts \
+            browse/test/server-sanitize-surrogates.test.ts \
+            test/setup-windows-fallback.test.ts \
+            test/build-script-shell-compat.test.ts \
+            test/docs-config-keys.test.ts \
             make-pdf/test/browseClient.test.ts \
             make-pdf/test/pdftotext.test.ts
         shell: bash

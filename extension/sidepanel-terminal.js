@@ -49,6 +49,15 @@
   let fitAddon = null;
   let ws = null;
   /**
+   * Sticky abort flag for tryAutoConnect's polling loop. Set when we
+   * receive an unrecoverable signal (auth invalid → 401, claude not
+   * found, fatal server error) so the loop doesn't keep retrying and
+   * spamming the user with the same failure message every 2s. Cleared
+   * by forceRestart() so the user can re-enter the polling loop after
+   * fixing whatever was wrong.
+   */
+  let autoConnectAborted = false;
+  /**
    * 25s client-side WS keepalive interval (v1.44+). Belt-and-suspenders with
    * the server-side ping in terminal-agent.ts: server pings cover most
    * idle-NAT cases, client keepalive frames also defend against Chromium's
@@ -325,6 +334,16 @@
 
     const minted = await mintSession();
     if (minted.error) {
+      // 401 = stale auth token; no amount of retrying will fix it. Sticky
+      // abort the polling loop so we don't spam the same error every 2s
+      // until the user clicks Restart (which clears the flag).
+      if (typeof minted.error === 'string' && minted.error.startsWith('401')) {
+        autoConnectAborted = true;
+        setState(STATE.IDLE, {
+          message: 'Auth invalid — reload the sidebar or restart your gstack session.',
+        });
+        return;
+      }
       setState(STATE.IDLE, { message: `Cannot start: ${minted.error}` });
       return;
     }
@@ -464,6 +483,9 @@
       term = null;
       fitAddon = null;
     }
+    // User explicitly asked for a fresh start; re-arm the auto-connect
+    // polling loop in case a prior auth failure stuck the abort flag.
+    autoConnectAborted = false;
     setState(STATE.IDLE, { message: 'Starting Claude Code...' });
     tryAutoConnect();
   }
@@ -542,23 +564,47 @@
    * as /health succeeds), then fires connect() automatically. The user
    * doesn't have to press a key — Terminal is the default tab and "tap to
    * start" was a needless paper cut on every reload.
+   *
+   * v1.44 patience overhaul: no more 15s give-up. The user already opened
+   * the sidebar; giving up tells them "you did something wrong" when the
+   * truth is the daemon is slow to boot (or restarting via the upstream
+   * supervisor). We poll forever at 2s intervals with ascending status
+   * messages so the user knows we're still trying, and ONLY abort on
+   * explicit signals: state transition out of IDLE (connect succeeded
+   * or user navigated), or an unrecoverable auth/network signal.
    */
   function tryAutoConnect() {
     if (state !== STATE.IDLE) return;
-    let waited = 0;
+    if (autoConnectAborted) return;
+    const startedAt = Date.now();
     const tick = () => {
       // If the user navigated away (Chat tab) or already connected, drop out.
       if (state !== STATE.IDLE) return;
+      // If a prior attempt hit an unrecoverable error (401, etc.), stop
+      // polling. The user clears the flag by clicking Restart.
+      if (autoConnectAborted) return;
       if (getServerPort() && getAuthToken()) {
         connect();
         return;
       }
-      waited += 200;
-      if (waited > 15000) {
-        setState(STATE.IDLE, { message: 'Browse server not ready. Reload sidebar to retry.' });
-        return;
+      // Ascending status messages — the user wants to know the sidebar is
+      // still trying. Each threshold is the moment the message would
+      // mislead if left silent: at 15s "should have started by now," at
+      // 60s "the server might be in trouble," at 5min "stop waiting and
+      // check on it manually."
+      const elapsed = Date.now() - startedAt;
+      if (elapsed > 300_000) {
+        setState(STATE.IDLE, {
+          message: 'Browse server still not responding after 5 min. Try `$B status` in a terminal.',
+        });
+      } else if (elapsed > 60_000) {
+        setState(STATE.IDLE, {
+          message: 'Still waiting — browse server may be slow to start.',
+        });
+      } else if (elapsed > 15_000) {
+        setState(STATE.IDLE, { message: 'Waiting for browse server...' });
       }
-      setTimeout(tick, 200);
+      setTimeout(tick, 2000);
     };
     tick();
   }

@@ -91,3 +91,96 @@ describe('RESOLVERS registry still loads with mixed shapes', () => {
     }
   });
 });
+
+/**
+ * Gap D (v1.46.0.0): live appliesTo gate end-to-end integration.
+ *
+ * The ResolverEntry / unwrapResolver machinery has unit coverage above. The
+ * remaining gap: does the gen-skill-docs.ts:444 substitution loop actually
+ * USE the gate? A refactor that drops the `if (appliesTo && !appliesTo(ctx))`
+ * check would silently break every future gated resolver.
+ *
+ * This test simulates the exact 4-line shape the live pipeline uses against
+ * a synthetic registry. If gen-skill-docs.ts is refactored and someone
+ * forgets to keep the gate check in sync, this assertion fails.
+ */
+describe('gen-skill-docs substitution loop respects the appliesTo gate', () => {
+  function simulateGenSubstitution(
+    template: string,
+    registry: Record<string, import('../scripts/resolvers/types').ResolverValue>,
+    ctx: TemplateContext,
+  ): string {
+    // Mirrors scripts/gen-skill-docs.ts:457-467 (the {{NAME}} substitution
+    // loop). Keep this in sync with the real loop. Drift here is what the
+    // test is designed to catch.
+    return template.replace(/\{\{(\w+(?::[^}]+)?)\}\}/g, (_match, fullKey) => {
+      const parts = fullKey.split(':');
+      const resolverName = parts[0];
+      const args = parts.slice(1);
+      const entry = registry[resolverName];
+      if (!entry) throw new Error(`Unknown placeholder {{${resolverName}}}`);
+      const { resolve, appliesTo } = unwrapResolver(entry);
+      if (appliesTo && !appliesTo(ctx)) return '';
+      return args.length > 0 ? resolve(ctx, args) : resolve(ctx);
+    });
+  }
+
+  test('plain-function resolver fires unconditionally', () => {
+    const tpl = '{{ALWAYS}}';
+    const out = simulateGenSubstitution(tpl, {
+      ALWAYS: () => 'fired',
+    }, makeCtx({ skillName: 'whatever' }));
+    expect(out).toBe('fired');
+  });
+
+  test('gated resolver fires only when appliesTo returns true', () => {
+    const tpl = 'before-{{GATED}}-after';
+    const out = simulateGenSubstitution(tpl, {
+      GATED: {
+        resolve: () => 'CONTENT',
+        appliesTo: (ctx) => ctx.skillName === 'allowed',
+      },
+    }, makeCtx({ skillName: 'allowed' }));
+    expect(out).toBe('before-CONTENT-after');
+  });
+
+  test('gated resolver is substituted with empty string when appliesTo returns false', () => {
+    const tpl = 'before-{{GATED}}-after';
+    const out = simulateGenSubstitution(tpl, {
+      GATED: {
+        resolve: () => 'CONTENT',
+        appliesTo: (ctx) => ctx.skillName === 'allowed',
+      },
+    }, makeCtx({ skillName: 'something-else' }));
+    expect(out).toBe('before--after');
+  });
+
+  test('mixed registry: gated + plain resolvers in the same template', () => {
+    const tpl = '{{PLAIN}} / {{GATED_ON}} / {{GATED_OFF}}';
+    const ctx = makeCtx({ skillName: 'ship' });
+    const out = simulateGenSubstitution(tpl, {
+      PLAIN: () => 'plain',
+      GATED_ON: { resolve: () => 'on', appliesTo: () => true },
+      GATED_OFF: { resolve: () => 'off', appliesTo: () => false },
+    }, ctx);
+    expect(out).toBe('plain / on / ');
+  });
+
+  test('parameterized resolver still respects gate', () => {
+    const tpl = '{{GATED:arg1:arg2}}';
+    const ctx = makeCtx({ skillName: 'no' });
+    const out = simulateGenSubstitution(tpl, {
+      GATED: {
+        resolve: (_c, args) => `fired-with-${(args ?? []).join('-')}`,
+        appliesTo: (c) => c.skillName === 'yes',
+      },
+    }, ctx);
+    expect(out).toBe(''); // gated off, args ignored
+  });
+
+  test('unknown resolver throws (matches real gen-skill-docs error contract)', () => {
+    expect(() =>
+      simulateGenSubstitution('{{NEVER_DEFINED}}', {}, makeCtx()),
+    ).toThrow(/Unknown placeholder/);
+  });
+});

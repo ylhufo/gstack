@@ -126,6 +126,75 @@ describe('SKILL.md size budget regression (gate, free)', () => {
     );
   });
 
+  /**
+   * Gap E (v1.46.0.0): per-skill min-size floor.
+   *
+   * The existing skill-coverage-floor enforces body ≥ 200 bytes, which is
+   * a tiny noise floor. A skill that was 100 KB at v1.44.1 and shrinks to
+   * 250 bytes passes that check despite losing 99.75% of content. The
+   * parity-suite content invariants cover this for 10 hand-picked skills
+   * (cso, ship, plan-ceo, etc.); the remaining 41 skills had no per-skill
+   * shrinkage floor.
+   *
+   * Floor: 80% of the v1.44.1 baseline. v1.46 actual shrinkage is <1% per
+   * skill, so this is a comfortable ceiling that still catches accidental
+   * mass deletion (e.g., a refactor that strips the body of a skill).
+   *
+   * v2.0.0.0 will introduce the sections/ pattern for 5 heavyweights
+   * (ship, plan-ceo-review, office-hours, plan-eng-review,
+   * plan-design-review). Those skills will legitimately shrink to ~15 KB
+   * skeletons. When that lands, add them to SECTIONS_EXTRACTED so the floor
+   * relaxes for them.
+   */
+  test('no skill shrinks past 80% of v1.44.1 baseline (catches accidental body strip)', () => {
+    const baseline: ParityBaseline = JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf-8'));
+    const current = captureBaseline({ repoRoot: REPO_ROOT });
+    const MIN_RATIO = 0.80; // a skill at <80% of its v1.44 size signals mass-deletion
+    const SECTIONS_EXTRACTED = new Set<string>(); // populate in v2.0.0.0 when sections/ lands
+
+    const undershoots: Array<{
+      skill: string; beforeBytes: number; afterBytes: number; ratio: number;
+    }> = [];
+    for (const [skill, before] of Object.entries(baseline.skills)) {
+      if (SECTIONS_EXTRACTED.has(skill)) continue;
+      const after = current.skills[skill];
+      if (!after) continue; // skill removed since baseline — separate concern
+      const ratio = after.skillMdBytes / before.skillMdBytes;
+      if (ratio < MIN_RATIO) {
+        undershoots.push({
+          skill, beforeBytes: before.skillMdBytes, afterBytes: after.skillMdBytes, ratio,
+        });
+      }
+    }
+
+    if (undershoots.length === 0) return;
+
+    const overrideReason = process.env.GSTACK_SIZE_BUDGET_OVERRIDE_REASON?.trim();
+    if (overrideReason) {
+      logBudgetOverride({
+        scope: 'skill-size-budget-floor',
+        reason: overrideReason,
+        details: { min_ratio: MIN_RATIO, undershoots },
+      });
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[skill-size-budget-floor] OVERRIDE APPLIED (${overrideReason}) — ${undershoots.length} undershoot(s) allowed`,
+      );
+      return;
+    }
+
+    const msg = undershoots.map(u =>
+      `  ${u.skill}: ${u.beforeBytes} → ${u.afterBytes} bytes (×${u.ratio.toFixed(2)} — below ${MIN_RATIO} floor)`,
+    ).join('\n');
+    throw new Error(
+      `${undershoots.length} skill(s) shrunk past v1.44.1 × ${MIN_RATIO} floor:\n${msg}\n` +
+      `This usually signals accidental body strip (e.g., a resolver returning empty, a ` +
+      `template losing a section). If the shrinkage is intentional (e.g., the skill moved ` +
+      `to the sections/ pattern), add it to SECTIONS_EXTRACTED in this test. Override: ` +
+      `GSTACK_SIZE_BUDGET_OVERRIDE_REASON="why" allows + audit-logs.`,
+    );
+  });
+
   test('catalog token estimate stays compressed (v1.45 target ≤ 7000)', () => {
     const current = captureBaseline({ repoRoot: REPO_ROOT });
     const v145Target = 7000;

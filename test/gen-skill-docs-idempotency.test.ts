@@ -33,11 +33,27 @@ const STABLE_OUTPUTS = [
   'gstack/llms.txt',
 ];
 
-function runGen(): { exitCode: number; stderr: string } {
-  const result = spawnSync('bun', ['run', 'gen:skill-docs'], {
+/**
+ * Sampled outputs from EVERY non-Claude host. The full host-all run touches
+ * .agents/, .cursor/, .factory/, .gbrain/, .hermes/, .kiro/, .openclaw/,
+ * .opencode/, .slate/ — picking one canonical file per host catches per-host
+ * non-determinism without paying the cost of snapshotting hundreds of files.
+ */
+const STABLE_HOST_ALL_OUTPUTS = [
+  'scripts/proactive-suggestions.json',
+  'SKILL.md',
+  'ship/SKILL.md',
+  '.agents/skills/gstack-ship/SKILL.md',
+  '.cursor/skills/gstack-ship/SKILL.md',
+  '.factory/skills/gstack-ship/SKILL.md',
+  '.gbrain/skills/gstack-ship/SKILL.md',
+];
+
+function runGen(extraArgs: string[] = []): { exitCode: number; stderr: string } {
+  const result = spawnSync('bun', ['run', 'gen:skill-docs', ...extraArgs], {
     cwd: REPO_ROOT,
     stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 60_000,
+    timeout: 120_000,
   });
   return {
     exitCode: result.status ?? -1,
@@ -45,9 +61,9 @@ function runGen(): { exitCode: number; stderr: string } {
   };
 }
 
-function snapshot(): Map<string, string> {
+function snapshot(files: string[] = STABLE_OUTPUTS): Map<string, string> {
   const m = new Map<string, string>();
-  for (const rel of STABLE_OUTPUTS) {
+  for (const rel of files) {
     const full = path.join(REPO_ROOT, rel);
     if (fs.existsSync(full)) {
       m.set(rel, fs.readFileSync(full, 'utf-8'));
@@ -107,4 +123,37 @@ describe('gen-skill-docs idempotency', () => {
       );
     }
   }, 90_000);
+
+  test('--host all idempotency: every host output is byte-stable across two runs', () => {
+    // Gap A: the default test above runs Claude host only. Non-Claude hosts
+    // (Codex, Factory, Cursor, OpenClaw, GBrain, Slate, OpenCode, Hermes,
+    // Kiro) have their own output paths and could carry their own
+    // non-deterministic fields. We hit a "--host all needed for freshness
+    // check" mid-/ship; this test pins the contract across every host.
+    const firstRun = runGen(['--host', 'all']);
+    expect(firstRun.exitCode).toBe(0);
+
+    const after1 = snapshot(STABLE_HOST_ALL_OUTPUTS);
+    expect(after1.size).toBeGreaterThan(0);
+
+    const secondRun = runGen(['--host', 'all']);
+    expect(secondRun.exitCode).toBe(0);
+
+    const after2 = snapshot(STABLE_HOST_ALL_OUTPUTS);
+
+    const flapping: string[] = [];
+    for (const [file, before] of after1.entries()) {
+      const now = after2.get(file);
+      if (now !== before) flapping.push(file);
+    }
+
+    if (flapping.length > 0) {
+      throw new Error(
+        `${flapping.length} file(s) changed between two consecutive --host all gen runs:\n` +
+        flapping.map(f => `  - ${f}`).join('\n') +
+        `\nLikely cause: a non-deterministic field leaked into a non-Claude host adapter ` +
+        `(scripts/host-adapters/*.ts). CI freshness checks for that host will flap.`,
+      );
+    }
+  }, 300_000); // ~5 min budget for two host-all runs
 });

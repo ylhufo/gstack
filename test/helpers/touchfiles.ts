@@ -374,6 +374,10 @@ export const E2E_TOUCHFILES: Record<string, string[]> = {
   // Real-device path — only runs with GSTACK_HAS_IOS_DEVICE=1 + a paired
   // iPhone. Validates the CoreDevice agent + iOS SDK toolchain. Periodic-tier.
   'ios-qa-device':    ['ios-qa/templates/**', 'test/fixtures/ios-qa/FixtureApp/**', 'test/skill-e2e-ios-device.test.ts'],
+
+  // /spec end-to-end via PTY — exercises the full Phase 1→5 pipeline
+  // including --execute spawn. Periodic-tier — paid + non-deterministic.
+  'spec-execute':     ['spec/**', 'test/skill-e2e-spec-execute.test.ts'],
 };
 
 /**
@@ -649,6 +653,8 @@ export const E2E_TIERS: Record<string, 'gate' | 'periodic'> = {
   'ios-qa-swift-build': 'periodic',
   // Requires a real connected + paired iPhone. Manual-trigger only.
   'ios-qa-device': 'periodic',
+  // /spec end-to-end PTY pipeline (paid, non-deterministic — periodic-tier).
+  'spec-execute': 'periodic',
 };
 
 /**
@@ -673,6 +679,9 @@ export const LLM_JUDGE_TOUCHFILES: Record<string, string[]> = {
   // Plan Reviews
   'plan-ceo-review/SKILL.md modes':       ['plan-ceo-review/SKILL.md', 'plan-ceo-review/SKILL.md.tmpl'],
   'plan-eng-review/SKILL.md sections':    ['plan-eng-review/SKILL.md', 'plan-eng-review/SKILL.md.tmpl'],
+
+  // /spec authored-spec quality (paid LLM-judge — periodic-tier).
+  'spec authored quality':                ['spec/SKILL.md', 'spec/SKILL.md.tmpl', 'test/fixtures/spec/**'],
   'plan-design-review/SKILL.md passes':   ['plan-design-review/SKILL.md', 'plan-design-review/SKILL.md.tmpl'],
 
   // Design skills
